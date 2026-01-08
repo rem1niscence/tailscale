@@ -1,4 +1,4 @@
-name: sync with Upstream and build
+name: Sync with Upstream - Push
 
 on:
   schedule:
