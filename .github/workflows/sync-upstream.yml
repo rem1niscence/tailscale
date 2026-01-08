@@ -1,0 +1,163 @@
+name: sync with Upstream and build
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  sync-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine latest upstream tag (excluding *prev*)
+        id: upstream-tag
+        run: |
+          set -euo pipefail
+          latest=$(
+            git ls-remote --tags --refs https://github.com/tailscale/tailscale.git 'v*' \
+            | awk '{print $2}' \
+            | sed 's|refs/tags/||' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | grep -v 'prev' \
+            | sort -V \
+            | tail -n1
+          )
+          if [ -z "${latest:-}" ]; then
+            echo "No upstream tag found"; exit 0
+          fi
+          echo "latest_tag=$latest" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream tag: $latest"
+
+      - name: Check if fork tag already exists
+        id: gate
+        run: |
+          set -euo pipefail
+          tag="${{ steps.upstream-tag.outputs.latest_tag }}"
+          fork_tag="${tag}-fork"
+          # check remote existence to be safe across runs
+          if git ls-remote --tags --refs "https://github.com/${GITHUB_REPOSITORY}.git" "${fork_tag}" | grep -q "${fork_tag}"; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "Fork tag ${fork_tag} already exists; skipping."
+          else
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "Fork tag ${fork_tag} not found; proceeding."
+          fi
+
+      - name: Prepare working tree from upstream tag and apply patch
+        if: steps.gate.outputs.needs_update == 'true'
+        run: |
+          set -euo pipefail
+          LATEST_TAG="${{ steps.upstream-tag.outputs.latest_tag }}"
+
+          # copy patch to a safe location before HEAD change
+          PATCH_SRC="patches/netmon-ignore-cilium-calico.patch"
+          PATCH_TMP="/tmp/netmon-ignore-cilium-calico.patch"
+          if [ -f "$PATCH_SRC" ]; then
+            echo "Copying patch $PATCH_SRC to $PATCH_TMP"
+            cp "$PATCH_SRC" "$PATCH_TMP"
+          else
+            echo "Patch file $PATCH_SRC not found in workspace"
+            exit 1
+          fi
+
+          echo "Fetching upstream tag: $LATEST_TAG"
+          git fetch --no-tags https://github.com/tailscale/tailscale.git "refs/tags/${LATEST_TAG}"
+          git checkout --detach FETCH_HEAD
+
+          if [ -f "$PATCH_TMP" ]; then
+            echo "Applying patch via git am..."
+            if ! git am --3way "$PATCH_TMP"; then
+              echo "git am failed; trying git apply..."
+              git am --abort || true
+              git apply --3way --index "$PATCH_TMP"
+              git commit -m "Apply fork patch: ignore cilium/cali in netmon"
+            fi
+          else
+            echo "Patch file patches/netmon-ignore-cilium-calico.patch not found"
+            exit 1
+          fi
+
+          git tag -a "${LATEST_TAG}-fork" -m "Patched ${LATEST_TAG} with fork change"
+
+      - name: Push tag
+        if: steps.gate.outputs.needs_update == 'true'
+        run: |
+          set -euo pipefail
+          LATEST_TAG="${{ steps.upstream-tag.outputs.latest_tag }}"
+          echo "Pushing fork tag..."
+          git push origin "${LATEST_TAG}-fork"
+
+      - name: Set up QEMU
+        if: steps.gate.outputs.needs_update == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.gate.outputs.needs_update == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: steps.gate.outputs.needs_update == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version info
+        if: steps.gate.outputs.needs_update == 'true'
+        id: version
+        run: |
+          eval "$(./build_dist.sh shellvars)"
+          echo "version_short=$VERSION_SHORT" >> $GITHUB_OUTPUT
+          echo "version_long=$VERSION_SHORT" >> $GITHUB_OUTPUT
+          echo "version_git_hash=$VERSION_GIT_HASH" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION_SHORT"
+
+      - name: Build and push Docker image
+        if: steps.gate.outputs.needs_update == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION_LONG=${{ steps.version.outputs.version_long }}
+            VERSION_SHORT=${{ steps.version.outputs.version_short }}
+            VERSION_GIT_HASH=${{ steps.version.outputs.version_git_hash }}
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version_short }}
+
+      - name: Create release summary
+        if: steps.gate.outputs.needs_update == 'true'
+        run: |
+          echo "## Upstream Sync Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**New Version:** ${{ steps.upstream-tag.outputs.latest_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Fork Tag:** ${{ steps.upstream-tag.outputs.latest_tag }}-fork" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Docker Images Published" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version_short }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: No update needed
+        if: steps.gate.outputs.needs_update == 'false'
+        run: |
+          echo "Already Up to Date" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Fork tag for ${{ steps.upstream-tag.outputs.latest_tag }} already exists."

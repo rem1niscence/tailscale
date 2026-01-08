@@ -1,0 +1,31 @@
+From 51509889a6ea7ae637bdb618e46fa9d2e36c9bea Mon Sep 17 00:00:00 2001
+From: Roniel Valdez <roniel_valdez@outlook.com>
+Date: Thu, 8 Jan 2026 16:07:47 +0100
+Subject: [PATCH] fix: do not try to connect to kubernetes CNI interfaces
+
+---
+ net/netmon/state.go | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/net/netmon/state.go b/net/netmon/state.go
+index aefbbb22d..b625c8958 100644
+--- a/net/netmon/state.go
++++ b/net/netmon/state.go
+@@ -44,6 +44,14 @@ func isProblematicInterface(nif *net.Interface) bool {
+ 	if strings.HasPrefix(name, "zt") || (runtime.GOOS == "windows" && strings.Contains(name, "ZeroTier")) {
+ 		return true
+ 	}
++	// Based on: https://github.com/tailscale/tailscale/pull/8682
++	// DoS each other by doing traffic amplification, both of them
++	// preferring/trying to use each other for transport. See:
++	// https://github.com/tailscale/tailscale/issues/7594
++	// https://github.com/tailscale/tailscale/issues/1552
++	if strings.HasPrefix(name, "cilium") || strings.HasPrefix(name, "cali") {
++		return true
++	}
+ 	return false
+ }
+ 
+-- 
+2.52.0
+
