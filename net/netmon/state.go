@@ -44,6 +44,14 @@ func isProblematicInterface(nif *net.Interface) bool {
 	if strings.HasPrefix(name, "zt") || (runtime.GOOS == "windows" && strings.Contains(name, "ZeroTier")) {
 		return true
 	}
+	// Based on: https://github.com/tailscale/tailscale/pull/8682
+	// DoS each other by doing traffic amplification, both of them
+	// preferring/trying to use each other for transport. See:
+	// https://github.com/tailscale/tailscale/issues/7594
+	// https://github.com/tailscale/tailscale/issues/1552
+	if strings.HasPrefix(name, "cilium") || strings.HasPrefix(name, "cali") {
+		return true
+	}
 	return false
 }
 
