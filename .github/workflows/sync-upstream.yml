@@ -100,6 +100,10 @@ jobs:
           set -euo pipefail
           LATEST_TAG="${{ steps.upstream-tag.outputs.latest_tag }}"
           echo "Pushing fork tag..."
+          # remove any http extraheader set by actions/checkout so the PAT auth is honored
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          # use the PAT stored in secrets.PUSH_PAT for authenticated git push from a fork
+          git remote set-url origin "https://x-access-token:${{ secrets.PUSH_PAT }}@github.com/${{ github.repository }}.git"
           git push origin "${LATEST_TAG}-fork"
 
       - name: Set up QEMU
@@ -116,7 +120,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.PUSH_PAT }}
 
       - name: Get version info
         if: steps.gate.outputs.needs_update == 'true'
